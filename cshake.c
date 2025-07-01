@@ -14,10 +14,10 @@ typedef struct {
 } cshake_ctx;
 
 int cshake_init(cshake_ctx *ctx, int is_cshake128) {
-    ctx->spec.rate = is_cshake128 ? 1344 : 1088;
+    ctx->spec.bitrate = is_cshake128 ? 1344 : 1088;
     ctx->spec.capacity = is_cshake128 ? 256 : 512;
-    ctx->spec.output = 256;      // desired output length in bits
-    ctx->spec.word_size = 64;    // Keccak-f[1600]
+    ctx->spec.output = 256;    // Desired output length in bits
+    ctx->spec.suffix = 0x04;   // SHAKE/cSHAKE XOF suffix
 
     if (libkeccak_state_initialise(&ctx->state, &ctx->spec) < 0) {
         fprintf(stderr, "State initialise failed\n");
@@ -35,13 +35,7 @@ int cshake_process(cshake_ctx *ctx, const unsigned char *data, size_t len) {
 }
 
 int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
-    unsigned char suffix_byte = 0x04; // SHAKE/cSHAKE XOF suffix
-    if (libkeccak_fast_update(&ctx->state, &suffix_byte, 1) < 0) {
-        fprintf(stderr, "Suffix append failed\n");
-        return -1;
-    }
-
-    libkeccak_squeeze(&ctx->state, out); // returns void, no return check
+    libkeccak_squeeze(&ctx->state, out); // Fills as per ctx->spec.output
 
     libkeccak_state_destroy(&ctx->state);
     return 0;
@@ -50,7 +44,7 @@ int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
 int main() {
     unsigned char data[172];
     for (int i = 0; i < 172; i++) {
-        data[i] = i & 0xFF; // Example pattern
+        data[i] = i & 0xFF; // Example test pattern
     }
 
     unsigned char out[64];
