@@ -4,10 +4,11 @@
 #include <libkeccak.h>
 
 typedef struct {
-    libkeccak_state_t state;
+    struct libkeccak_state state;
     int initialized;
     size_t capacity;
     size_t rate;
+    size_t output_size;
 } cshake_ctx_t;
 
 /**
@@ -15,34 +16,41 @@ typedef struct {
  * 
  * @param ctx - cSHAKE context
  * @param capacity - Security parameter (256 for cSHAKE256, 128 for cSHAKE128)
+ * @param output_size - Desired output size in bits (0 for arbitrary length)
  * @param bytepad_data - Pre-computed bytepad(encode_string(N) || encode_string(S), rate/8)
- * @param bytepad_len - Length of bytepad_data
+ * @param bytepad_len - Length of bytepad_data in bytes
  * @return 0 on success, -1 on error
  */
-int cshake_init(cshake_ctx_t *ctx, int capacity, 
-                const uint8_t *bytepad_data, size_t bytepad_len) {
+int cshake_init(cshake_ctx_t *ctx, int capacity, size_t output_size,
+                const char *bytepad_data, size_t bytepad_len) {
     if (!ctx) return -1;
     
     ctx->capacity = capacity;
-    ctx->rate = 1600 - 2 * capacity; // Keccak rate
+    ctx->rate = 1600 - 2 * capacity;
+    ctx->output_size = output_size;
     
-    libkeccak_spec_t spec;
-    libkeccak_spec_shake(&spec, ctx->capacity, ctx->capacity);
+    // Create spec for cSHAKE (using SHAKE as base)
+    struct libkeccak_spec spec;
+    if (capacity == 128) {
+        libkeccak_spec_shake(&spec, 128, output_size);
+    } else if (capacity == 256) {
+        libkeccak_spec_shake(&spec, 256, output_size);
+    } else {
+        return -1; // Unsupported capacity
+    }
     
+    // Initialize state
     if (libkeccak_state_initialise(&ctx->state, &spec) < 0) {
         return -1;
     }
     
-    // If no bytepad data provided, use regular SHAKE
-    if (!bytepad_data || bytepad_len == 0) {
-        ctx->initialized = 1;
-        return 0;
-    }
-    
-    // Absorb the pre-computed bytepad data
-    if (libkeccak_update(&ctx->state, bytepad_data, bytepad_len) < 0) {
-        libkeccak_state_destroy(&ctx->state);
-        return -1;
+    // If no bytepad data provided, this becomes regular SHAKE
+    if (bytepad_data && bytepad_len > 0) {
+        // Absorb the pre-computed bytepad data
+        if (libkeccak_absorb(&ctx->state, bytepad_data, bytepad_len) < 0) {
+            libkeccak_state_destroy(&ctx->state);
+            return -1;
+        }
     }
     
     ctx->initialized = 1;
@@ -57,12 +65,12 @@ int cshake_init(cshake_ctx_t *ctx, int capacity,
  * @param len - Length of input data in bytes
  * @return 0 on success, -1 on error
  */
-int cshake_update(cshake_ctx_t *ctx, const uint8_t *data, size_t len) {
+int cshake_update(cshake_ctx_t *ctx, const char *data, size_t len) {
     if (!ctx || !ctx->initialized) return -1;
     if (!data && len > 0) return -1;
     if (len == 0) return 0;
     
-    return libkeccak_update(&ctx->state, data, len);
+    return libkeccak_absorb(&ctx->state, data, len);
 }
 
 /**
@@ -73,11 +81,34 @@ int cshake_update(cshake_ctx_t *ctx, const uint8_t *data, size_t len) {
  * @param output_len - Desired output length in bytes
  * @return 0 on success, -1 on error
  */
-int cshake_final(cshake_ctx_t *ctx, uint8_t *output, size_t output_len) {
+int cshake_final(cshake_ctx_t *ctx, char *output, size_t output_len) {
     if (!ctx || !ctx->initialized || !output) return -1;
     
-    // For cSHAKE, use domain separation 0x04 instead of SHAKE's 0x1F
-    int result = libkeccak_digest(&ctx->state, NULL, 0, 0x04, output, output_len);
+    // For cSHAKE, we need to use the correct suffix
+    // cSHAKE uses 0x04 as domain separation, but maandree's libkeccak
+    // handles this through the squeeze function
+    int result = libkeccak_squeeze(&ctx->state, output, output_len);
+    
+    ctx->initialized = 0;
+    return result;
+}
+
+/**
+ * Alternative finalize that handles cSHAKE domain separation explicitly
+ */
+int cshake_final_explicit(cshake_ctx_t *ctx, char *output, size_t output_len) {
+    if (!ctx || !ctx->initialized || !output) return -1;
+    
+    // Add cSHAKE padding manually if needed
+    // This may not be necessary depending on how bytepad data was prepared
+    const char cshake_suffix = 0x04;
+    
+    // Absorb final padding
+    if (libkeccak_absorb(&ctx->state, &cshake_suffix, 1) < 0) {
+        return -1;
+    }
+    
+    int result = libkeccak_squeeze(&ctx->state, output, output_len);
     
     ctx->initialized = 0;
     return result;
@@ -87,30 +118,30 @@ int cshake_final(cshake_ctx_t *ctx, uint8_t *output, size_t output_len) {
  * Clean up cSHAKE context
  */
 void cshake_cleanup(cshake_ctx_t *ctx) {
-    if (ctx) {
-        if (ctx->initialized) {
-            libkeccak_state_destroy(&ctx->state);
-            ctx->initialized = 0;
-        }
+    if (ctx && ctx->initialized) {
+        libkeccak_state_destroy(&ctx->state);
+        ctx->initialized = 0;
     }
 }
 
 /**
  * Convenience function for single-shot cSHAKE with pre-computed bytepad data
  */
-int cshake_hash(const uint8_t *bytepad_data, size_t bytepad_len,
-                const uint8_t *message, size_t msg_len,
-                uint8_t *output, size_t output_len,
+int cshake_hash(const char *bytepad_data, size_t bytepad_len,
+                const char *message, size_t msg_len,
+                char *output, size_t output_len,
                 int capacity) {
     cshake_ctx_t ctx;
     
-    if (cshake_init(&ctx, capacity, bytepad_data, bytepad_len) < 0) {
+    if (cshake_init(&ctx, capacity, output_len * 8, bytepad_data, bytepad_len) < 0) {
         return -1;
     }
     
-    if (cshake_update(&ctx, message, msg_len) < 0) {
-        cshake_cleanup(&ctx);
-        return -1;
+    if (message && msg_len > 0) {
+        if (cshake_update(&ctx, message, msg_len) < 0) {
+            cshake_cleanup(&ctx);
+            return -1;
+        }
     }
     
     if (cshake_final(&ctx, output, output_len) < 0) {
@@ -122,20 +153,33 @@ int cshake_hash(const uint8_t *bytepad_data, size_t bytepad_len,
     return 0;
 }
 
+/**
+ * Helper function to print hex output
+ */
+void print_hex(const char *label, const char *data, size_t len) {
+    printf("%s", label);
+    for (size_t i = 0; i < len; i++) {
+        printf("%02x", (unsigned char)data[i]);
+    }
+    printf("\n");
+}
+
 // Example usage
 int main() {
     // Example: cSHAKE256 with multipart message
     cshake_ctx_t ctx;
-    uint8_t output[32];
+    char output[32];
     
     // Pre-computed bytepad data (you would compute this externally)
     // This would be: bytepad(encode_string(N) || encode_string(S), rate/8)
-    // For this example, we'll use empty bytepad data (equivalent to SHAKE)
-    const uint8_t *bytepad_data = NULL;
+    // For this example, we'll use NULL (equivalent to SHAKE)
+    const char *bytepad_data = NULL;
     size_t bytepad_len = 0;
     
-    // Initialize cSHAKE256
-    if (cshake_init(&ctx, 256, bytepad_data, bytepad_len) < 0) {
+    printf("=== cSHAKE256 Multipart Example ===\n");
+    
+    // Initialize cSHAKE256 (256-bit capacity, 32-byte output)
+    if (cshake_init(&ctx, 256, 256, bytepad_data, bytepad_len) < 0) {
         fprintf(stderr, "Failed to initialize cSHAKE\n");
         return 1;
     }
@@ -145,9 +189,9 @@ int main() {
     const char *part2 = "a multipart message for ";
     const char *part3 = "cSHAKE hashing.";
     
-    if (cshake_update(&ctx, (uint8_t*)part1, strlen(part1)) < 0 ||
-        cshake_update(&ctx, (uint8_t*)part2, strlen(part2)) < 0 ||
-        cshake_update(&ctx, (uint8_t*)part3, strlen(part3)) < 0) {
+    if (cshake_update(&ctx, part1, strlen(part1)) < 0 ||
+        cshake_update(&ctx, part2, strlen(part2)) < 0 ||
+        cshake_update(&ctx, part3, strlen(part3)) < 0) {
         fprintf(stderr, "Failed to update cSHAKE\n");
         cshake_cleanup(&ctx);
         return 1;
@@ -160,38 +204,44 @@ int main() {
         return 1;
     }
     
-    // Print result
-    printf("cSHAKE256 output: ");
-    for (int i = 0; i < sizeof(output); i++) {
-        printf("%02x", output[i]);
-    }
-    printf("\n");
-    
+    print_hex("cSHAKE256 output: ", output, sizeof(output));
     cshake_cleanup(&ctx);
     
-    // Example with actual bytepad data (you would compute this)
-    // For demonstration, let's use some dummy bytepad data
-    uint8_t sample_bytepad[] = {
-        0x01, 0x20,  // left_encode(32) - example for 4-byte name
-        'T', 'e', 's', 't',  // Name "Test" 
-        0x01, 0x20,  // left_encode(32) - example for 4-byte custom
-        'A', 'p', 'p', 's',  // Custom "Apps"
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // Padding to rate boundary
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        // ... more padding as needed for rate alignment
-    };
+    printf("\n=== Single-shot Example ===\n");
     
-    const char *message = "Single shot message with bytepad";
-    uint8_t output2[64];
+    // Example with single-shot API
+    const char *message = "Single shot message";
+    char output2[64];
+    
+    if (cshake_hash(NULL, 0, message, strlen(message),
+                    output2, sizeof(output2), 256) == 0) {
+        print_hex("Single-shot cSHAKE256: ", output2, 32); // Print first 32 bytes
+    }
+    
+    printf("\n=== Example with bytepad data ===\n");
+    
+    // Example with dummy bytepad data
+    // In practice, this would be computed as:
+    // bytepad(encode_string(N) || encode_string(S), rate/8)
+    char sample_bytepad[136]; // For cSHAKE256, rate/8 = 136 bytes
+    memset(sample_bytepad, 0, sizeof(sample_bytepad));
+    
+    // Simplified example - in practice you'd compute proper bytepad
+    sample_bytepad[0] = 0x01; // Length encoding
+    sample_bytepad[1] = 0x20; // 32 bits for 4 bytes
+    memcpy(sample_bytepad + 2, "Test", 4); // Name
+    sample_bytepad[6] = 0x01; // Length encoding  
+    sample_bytepad[7] = 0x20; // 32 bits for 4 bytes
+    memcpy(sample_bytepad + 8, "Demo", 4); // Customization
+    // Rest is zero padding to rate boundary
+    
+    const char *test_msg = "Message with custom bytepad";
+    char output3[32];
     
     if (cshake_hash(sample_bytepad, sizeof(sample_bytepad),
-                    (uint8_t*)message, strlen(message),
-                    output2, sizeof(output2), 256) == 0) {
-        printf("cSHAKE256 with bytepad: ");
-        for (int i = 0; i < 32; i++) { // Print first 32 bytes
-            printf("%02x", output2[i]);
-        }
-        printf("\n");
+                    test_msg, strlen(test_msg),
+                    output3, sizeof(output3), 256) == 0) {
+        print_hex("cSHAKE256 with bytepad: ", output3, sizeof(output3));
     }
     
     return 0;
