@@ -86,23 +86,34 @@ int compute_cshake_single(const char *message, size_t message_length,
     return 0;
 }
 
-// Function using libkeccak_cshake_* convenience functions
-int compute_cshake_convenience(const char *message, size_t message_length,
-                             size_t output_length, char *hash_output) {
+// Function for CSHAKE128 variant
+int compute_cshake128_single(const char *message, size_t message_length,
+                           size_t output_length, char *hash_output) {
     
     struct libkeccak_spec spec;
+    struct libkeccak_state state;
     int ret;
     
-    // Set up CSHAKE256 specification
-    libkeccak_spec_cshake(&spec, 256, output_length * 8);
+    // Set up CSHAKE128 specification
+    libkeccak_spec_cshake(&spec, 128, output_length * 8);
     
-    // Use the convenience function (if data is already bytepadded)
-    ret = libkeccak_cshake(&spec, message, message_length, hash_output);
+    // Initialize the state
+    ret = libkeccak_state_initialise(&state, &spec);
     if (ret) {
-        fprintf(stderr, "Failed to compute CSHAKE hash: %d\n", ret);
+        fprintf(stderr, "Failed to initialize Keccak state: %d\n", ret);
         return -1;
     }
     
+    // Use libkeccak_digest directly with the complete message
+    ret = libkeccak_digest(&state, message, message_length, 0, "", hash_output);
+    if (ret) {
+        fprintf(stderr, "Failed to compute hash: %d\n", ret);
+        libkeccak_state_destroy(&state);
+        return -1;
+    }
+    
+    // Clean up
+    libkeccak_state_destroy(&state);
     return 0;
 }
 
@@ -161,16 +172,16 @@ int main() {
         printf("Single message hash computation failed\n");
     }
     
-    // Method 3: Using convenience function
-    printf("\nMethod 3: Convenience function\n");
+    // Method 3: Using CSHAKE128 variant
+    printf("\nMethod 3: CSHAKE128 variant\n");
     memset(hash_output, 0, sizeof(hash_output));
-    result = compute_cshake_convenience(concatenated, total_len, output_length, hash_output);
+    result = compute_cshake128_single(concatenated, total_len, output_length, hash_output);
     
     if (result == 0) {
         bytes_to_hex((unsigned char*)hash_output, output_length, hex_output);
-        printf("CSHAKE Hash (convenience): %s\n", hex_output);
+        printf("CSHAKE128 Hash: %s\n", hex_output);
     } else {
-        printf("Convenience function hash computation failed\n");
+        printf("CSHAKE128 hash computation failed\n");
     }
     
     printf("\nHash length: %zu bytes\n", output_length);
