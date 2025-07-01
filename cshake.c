@@ -14,9 +14,10 @@ typedef struct {
 } cshake_ctx;
 
 int cshake_init(cshake_ctx *ctx, int is_cshake128) {
-    libkeccak_spec_initialise(&ctx->spec, is_cshake128 ? 1344 : 1088, is_cshake128 ? 256 : 512);
+    libkeccak_spec_initialise(&ctx->spec,
+                               is_cshake128 ? 1344 : 1088,
+                               is_cshake128 ? 256 : 512);
 
-    // FIX: pass &ctx->spec (NOT generalised_spec)
     if (libkeccak_state_initialise(&ctx->state, &ctx->spec) < 0) {
         fprintf(stderr, "State initialise failed\n");
         return -1;
@@ -33,8 +34,15 @@ int cshake_process(cshake_ctx *ctx, const unsigned char *data, size_t len) {
 }
 
 int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
-    // FIX: use libkeccak_squeeze, not libkeccak_fast_squeeze, to pass the suffix
-    if (libkeccak_squeeze(&ctx->state, out, outlen, 0x04) < 0) { // 0x04 = SHAKE/cSHAKE XOF suffix
+    // Append SHAKE/cSHAKE XOF suffix manually
+    unsigned char suffix_byte = 0x04;
+    if (libkeccak_fast_update(&ctx->state, &suffix_byte, 1) < 0) {
+        fprintf(stderr, "Suffix append failed\n");
+        return -1;
+    }
+
+    // Correct squeeze call
+    if (libkeccak_squeeze(&ctx->state, out, outlen) < 0) {
         fprintf(stderr, "Squeeze failed\n");
         return -1;
     }
@@ -45,7 +53,7 @@ int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
 int main() {
     unsigned char data[172];
     for (int i = 0; i < 172; i++) {
-        data[i] = i & 0xFF; // Example test pattern
+        data[i] = i & 0xFF; // Example pattern
     }
 
     unsigned char out[64];
