@@ -34,18 +34,19 @@ int cshake_process(cshake_ctx *ctx, const unsigned char *data, size_t len) {
 }
 
 int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
-    // Append SHAKE/cSHAKE XOF suffix manually
-    unsigned char suffix_byte = 0x04;
+    unsigned char suffix_byte = 0x04; // SHAKE/cSHAKE XOF suffix
     if (libkeccak_fast_update(&ctx->state, &suffix_byte, 1) < 0) {
         fprintf(stderr, "Suffix append failed\n");
         return -1;
     }
 
-    // Correct squeeze call
-    if (libkeccak_squeeze(&ctx->state, out, outlen) < 0) {
+    ctx->state.block_size = outlen * 8; // Set output length in bits
+
+    if (libkeccak_squeeze(&ctx->state, out) < 0) {
         fprintf(stderr, "Squeeze failed\n");
         return -1;
     }
+
     libkeccak_state_destroy(&ctx->state);
     return 0;
 }
@@ -53,7 +54,7 @@ int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
 int main() {
     unsigned char data[172];
     for (int i = 0; i < 172; i++) {
-        data[i] = i & 0xFF; // Example pattern
+        data[i] = i & 0xFF; // Example test pattern
     }
 
     unsigned char out[64];
