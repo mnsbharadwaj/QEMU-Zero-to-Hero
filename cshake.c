@@ -14,9 +14,10 @@ typedef struct {
 } cshake_ctx;
 
 int cshake_init(cshake_ctx *ctx, int is_cshake128) {
-    libkeccak_spec_initialise(&ctx->spec,
-                               is_cshake128 ? 1344 : 1088,
-                               is_cshake128 ? 256 : 512);
+    ctx->spec.rate = is_cshake128 ? 1344 : 1088;
+    ctx->spec.capacity = is_cshake128 ? 256 : 512;
+    ctx->spec.output = 256;      // desired output length in bits
+    ctx->spec.word_size = 64;    // Keccak-f[1600]
 
     if (libkeccak_state_initialise(&ctx->state, &ctx->spec) < 0) {
         fprintf(stderr, "State initialise failed\n");
@@ -40,7 +41,7 @@ int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
         return -1;
     }
 
-    libkeccak_squeeze(&ctx->state, out); // Correct: no return value
+    libkeccak_squeeze(&ctx->state, out); // returns void, no return check
 
     libkeccak_state_destroy(&ctx->state);
     return 0;
