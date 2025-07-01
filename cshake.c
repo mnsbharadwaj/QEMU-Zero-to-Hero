@@ -40,12 +40,7 @@ int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
         return -1;
     }
 
-    ctx->state.block_size = outlen * 8; // Set output length in bits
-
-    if (libkeccak_squeeze(&ctx->state, out) < 0) {
-        fprintf(stderr, "Squeeze failed\n");
-        return -1;
-    }
+    libkeccak_squeeze(&ctx->state, out); // Correct: no return value
 
     libkeccak_state_destroy(&ctx->state);
     return 0;
@@ -54,7 +49,7 @@ int cshake_done(cshake_ctx *ctx, unsigned char *out, size_t outlen) {
 int main() {
     unsigned char data[172];
     for (int i = 0; i < 172; i++) {
-        data[i] = i & 0xFF; // Example test pattern
+        data[i] = i & 0xFF; // Example pattern
     }
 
     unsigned char out[64];
@@ -65,7 +60,7 @@ int main() {
 
     cshake_process(&ctx, data, 168);       // first block
     cshake_process(&ctx, data + 168, 4);   // second block
-    cshake_done(&ctx, out, 32);
+    cshake_done(&ctx, out, 32);            // read first 32 bytes
     print_hex(out, 32);
 
     printf("cSHAKE256 multiblock (libkeccak): ");
@@ -73,7 +68,7 @@ int main() {
 
     cshake_process(&ctx, data, 168);       // first block
     cshake_process(&ctx, data + 168, 4);   // second block
-    cshake_done(&ctx, out, 32);
+    cshake_done(&ctx, out, 32);            // read first 32 bytes
     print_hex(out, 32);
 
     return 0;
