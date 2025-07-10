@@ -8,121 +8,110 @@ unsigned char expected_ct[23] = {0x58,0x8c,0x97,0x9a,0x61,0xc6,0x63,0xd2,0xf0,0x
 unsigned char expected_tag[16] = {0x17,0xe8,0xd1,0x2c,0xfd,0xf9,0x26,0xe0,0x8c,0xd0,0x8b,0xef,0x7f,0x42,0x97,0x6d};
 // Set lengths accordingly.
 
-#include <tomcrypt.h>
-#include <stdio.h>
+#include <openssl/evp.h>
 #include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
 
-int aes_ccm_encrypt_chunked(
-    const unsigned char *key, unsigned long keylen,
-    const unsigned char *nonce, unsigned long noncelen,
-    const unsigned char *aad, unsigned long aadlen,
-    const unsigned char *pt, unsigned long ptlen,
-    unsigned char *ct,
-    unsigned char *tag, unsigned long taglen)
-{
-    int err, idx;
-    ccm_state ccm;
-    unsigned long offset, chunk;
-
-    if ((idx = find_cipher("aes")) < 0) return CRYPT_INVALID_CIPHER;
-
-    // 1. CCM init
-    if ((err = ccm_init(&ccm, idx, key, keylen, ptlen, taglen, aadlen)) != CRYPT_OK) return err;
-
-    // 2. Feed nonce
-    if ((err = ccm_add_nonce(&ccm, nonce, noncelen)) != CRYPT_OK) return err;
-
-    // 3. Feed AAD in chunks
-    offset = 0;
-    while (offset < aadlen) {
-        chunk = (aadlen - offset > 16) ? 16 : (aadlen - offset);
-        if ((err = ccm_add_aad(&ccm, aad + offset, chunk)) != CRYPT_OK) return err;
-        offset += chunk;
-    }
-
-    // 4. Encrypt in chunks
-    offset = 0;
-    while (offset < ptlen) {
-        chunk = (ptlen - offset > 16) ? 16 : (ptlen - offset);
-        if ((err = ccm_process(&ccm, pt + offset, ct + offset, chunk, CCM_ENCRYPT)) != CRYPT_OK) return err;
-        offset += chunk;
-    }
-
-    // 5. Finish, get tag
-    if ((err = ccm_done(&ccm, tag, &taglen)) != CRYPT_OK) return err;
-
-    return CRYPT_OK;
+void handleErrors(const char *msg) {
+    fprintf(stderr, "Error: %s\n", msg);
+    ERR_print_errors_fp(stderr);
+    exit(1);
 }
 
-int aes_ccm_decrypt_chunked(
-    const unsigned char *key, unsigned long keylen,
-    const unsigned char *nonce, unsigned long noncelen,
-    const unsigned char *aad, unsigned long aadlen,
-    const unsigned char *ct, unsigned long ctlen,
-    unsigned char *pt,
-    const unsigned char *tag, unsigned long taglen)
-{
-    int err, idx;
-    ccm_state ccm;
-    unsigned long offset, chunk;
-    unsigned long tag_stat = 0;
+int main() {
+    // Key and IV (nonce)
+    unsigned char key[16] = "0123456789abcdef";
+    unsigned char nonce[12] = "uniqueNonce12"; // CCM: 7-13 bytes
 
-    if ((idx = find_cipher("aes")) < 0) return CRYPT_INVALID_CIPHER;
+    // Plaintext and AAD
+    unsigned char plaintext[] = "This is secret data!";
+    unsigned char aad[] = "AAD Data";
 
-    if ((err = ccm_init(&ccm, idx, key, keylen, ctlen, taglen, aadlen)) != CRYPT_OK) return err;
+    // Buffers for ciphertext, decrypted text, and tag
+    unsigned char ciphertext[128], decryptedtext[128], tag[16];
+    int ciphertext_len, decryptedtext_len, len;
 
-    if ((err = ccm_add_nonce(&ccm, nonce, noncelen)) != CRYPT_OK) return err;
+    // Encryption
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) handleErrors("EVP_CIPHER_CTX_new failed");
 
-    offset = 0;
-    while (offset < aadlen) {
-        chunk = (aadlen - offset > 16) ? 16 : (aadlen - offset);
-        if ((err = ccm_add_aad(&ccm, aad + offset, chunk)) != CRYPT_OK) return err;
-        offset += chunk;
-    }
+    if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_128_ccm(), NULL, NULL, NULL))
+        handleErrors("EncryptInit");
 
-    offset = 0;
-    while (offset < ctlen) {
-        chunk = (ctlen - offset > 16) ? 16 : (ctlen - offset);
-        if ((err = ccm_process(&ccm, ct + offset, pt + offset, chunk, CCM_DECRYPT)) != CRYPT_OK) return err;
-        offset += chunk;
-    }
+    // Set IV length and tag length *before* key/iv!
+    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN, sizeof(nonce), NULL))
+        handleErrors("IV len");
+    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG, 16, NULL))
+        handleErrors("TAG len");
 
-    // Tag verification
-    if ((err = ccm_done(&ccm, (unsigned char*)tag, &tag_stat)) != CRYPT_OK) return err;
-    if (tag_stat != 1) return CRYPT_ERROR;
+    // Set key and IV (nonce)
+    if (1 != EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce))
+        handleErrors("EncryptInit key/iv");
 
-    return CRYPT_OK;
-}
+    // Provide total plaintext length (required for CCM)
+    if (1 != EVP_EncryptUpdate(ctx, NULL, &len, NULL, sizeof(plaintext)-1))
+        handleErrors("Set ptlen");
 
-int main(void)
-{
-    unsigned char key[16]   = {0};
-    unsigned char nonce[12] = {0};
-    const char *aad_data = "CCM multi-block AAD test";
-    const char *pt_data  = "Hello CCM chunked world!";
-    unsigned long aadlen = strlen(aad_data);
-    unsigned long ptlen  = strlen(pt_data);
-    unsigned char *ct = calloc(ptlen, 1), *pt2 = calloc(ptlen, 1), tag[16];
-    int err;
+    // Provide AAD
+    if (1 != EVP_EncryptUpdate(ctx, NULL, &len, aad, sizeof(aad)-1))
+        handleErrors("AAD");
 
-    if ((err = aes_ccm_encrypt_chunked(key, sizeof(key), nonce, sizeof(nonce),
-            (unsigned char*)aad_data, aadlen, (unsigned char*)pt_data, ptlen, ct, tag, sizeof(tag))) != CRYPT_OK) {
-        printf("Encryption error: %s\n", error_to_string(err));
+    // Encrypt plaintext
+    if (1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, sizeof(plaintext)-1))
+        handleErrors("EncryptUpdate");
+    ciphertext_len = len;
+
+    // Get the tag
+    if (1 != EVP_EncryptFinal_ex(ctx, NULL, &len))
+        handleErrors("EncryptFinal");
+    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_GET_TAG, 16, tag))
+        handleErrors("Get TAG");
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    printf("Ciphertext: ");
+    for(int i = 0; i < ciphertext_len; i++)
+        printf("%02x", ciphertext[i]);
+    printf("\nTag: ");
+    for(int i = 0; i < 16; i++)
+        printf("%02x", tag[i]);
+    printf("\n");
+
+    // Decryption
+    ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) handleErrors("EVP_CIPHER_CTX_new (dec)");
+
+    if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_128_ccm(), NULL, NULL, NULL))
+        handleErrors("DecryptInit");
+
+    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN, sizeof(nonce), NULL))
+        handleErrors("IV len dec");
+    if (1 != EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG, 16, tag))
+        handleErrors("Set tag dec");
+
+    if (1 != EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce))
+        handleErrors("DecryptInit key/iv");
+
+    if (1 != EVP_DecryptUpdate(ctx, NULL, &len, NULL, ciphertext_len))
+        handleErrors("Set ptlen dec");
+
+    if (1 != EVP_DecryptUpdate(ctx, NULL, &len, aad, sizeof(aad)-1))
+        handleErrors("AAD dec");
+
+    if (1 != EVP_DecryptUpdate(ctx, decryptedtext, &len, ciphertext, ciphertext_len))
+        handleErrors("DecryptUpdate");
+    decryptedtext_len = len;
+
+    if (1 != EVP_DecryptFinal_ex(ctx, NULL, &len)) {
+        printf("Tag verification failed!\n");
+        EVP_CIPHER_CTX_free(ctx);
         return 1;
     }
+    EVP_CIPHER_CTX_free(ctx);
 
-    printf("Ciphertext: "); for (unsigned long i = 0; i < ptlen; i++) printf("%02X ", ct[i]);
-    printf("\nTag: "); for (unsigned long i = 0; i < sizeof(tag); i++) printf("%02X ", tag[i]); printf("\n");
+    decryptedtext[decryptedtext_len] = '\0';
 
-    if ((err = aes_ccm_decrypt_chunked(key, sizeof(key), nonce, sizeof(nonce),
-            (unsigned char*)aad_data, aadlen, ct, ptlen, pt2, tag, sizeof(tag))) != CRYPT_OK) {
-        printf("Decryption error: %s\n", error_to_string(err));
-        free(ct); free(pt2); return 1;
-    }
-
-    printf("Decrypted: %.*s\n", (int)ptlen, pt2);
-
-    free(ct); free(pt2);
+    printf("Decrypted text: %s\n", decryptedtext);
     return 0;
 }
